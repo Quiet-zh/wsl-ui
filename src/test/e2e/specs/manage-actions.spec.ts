@@ -14,6 +14,7 @@ import {
   waitForDialogToDisappear,
   captureDistroStates,
   verifyStatesUnchanged,
+  switchToMainWindow,
 } from "../utils";
 
 describe("Manage Quick Actions", () => {
@@ -31,6 +32,7 @@ describe("Manage Quick Actions", () => {
    * Helper to wait for a dialog to appear
    */
   async function waitForDialog(): Promise<WebdriverIO.Element> {
+    await switchToMainWindow();
     await browser.waitUntil(
       async () => {
         const dialog = await findOpenDialog();
@@ -60,6 +62,7 @@ describe("Manage Quick Actions", () => {
    * This clicks "Shutdown & Continue" to proceed to the actual dialog.
    */
   async function handleShutdownDialogIfPresent(): Promise<void> {
+    await switchToMainWindow();
     // Wait a moment for any dialog to appear
     try {
       await browser.waitUntil(
@@ -157,14 +160,14 @@ describe("Manage Quick Actions", () => {
       expect(text).toContain("Set Default User");
     });
 
-    it("should have Sparse Mode option with toggle indicator", async () => {
+    it("should offer explicit sparse mode enable and disable commands", async () => {
       await actions.openManageSubmenu("Ubuntu");
 
       const sparseAction = await $(selectors.sparseAction);
       const text = await sparseAction.getText();
-      expect(text).toContain("Sparse Mode");
-      // Note: OR is intentional - checking that a toggle state indicator is present (either state is valid)
-      expect(text).toMatch(/\b(Off|On)\b/);
+      expect(text).toContain("Enable sparse mode");
+      const disableAction = await $('[data-testid="manage-action-sparse-disable"]');
+      await expect(disableAction).toHaveText(expect.stringContaining("Disable sparse mode"));
     });
   });
 
@@ -543,6 +546,7 @@ describe("Manage Quick Actions", () => {
       await sparseAction.click();
 
       // Wait for either error message or shutdown dialog to appear
+      await switchToMainWindow();
       await browser.waitUntil(
         async () => {
           // Check for error pre element
@@ -626,6 +630,7 @@ describe("Manage Quick Actions", () => {
       await setVersionAction.click();
 
       // Should show stop-and-action dialog
+      await switchToMainWindow();
       const stopDialog = await $(selectors.stopAndActionDialog);
       await browser.waitUntil(
         async () => stopDialog.isDisplayed(),

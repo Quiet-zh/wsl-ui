@@ -1547,6 +1547,83 @@ remove leftover containers with `docker rm <id>` / `podman rm <id>`.
 
 ---
 
+## Issue #28: Quick Install is empty or stays empty after a failed catalog request
+
+### Symptoms
+The Quick Install list is empty even though `wsl --list --online` succeeds in PowerShell, or the list never recovers after a network/WSL error.
+
+### Root Cause
+The dialog previously hid catalog errors and could retain an empty list after loading its separate metadata catalog. The backend also accepted unsuccessful WSL command output as an empty successful result.
+
+### Diagnosis and Solution
+Open the dialog again or choose **Retry**. The dialog now refreshes the catalog and displays WSL's native error details. Run `wsl --list --online` in PowerShell if an error persists; record the returned message rather than assuming the network is blocked. Responses from a closed dialog are ignored.
+
+Related: [GitHub #154](https://github.com/octasoft-ltd/wsl-ui/issues/154).
+
+## Issue #29: Download remains at “0 B of ?”
+
+Servers can stream a file without a Content-Length header. This previously suppressed progress events. Downloads now report bytes periodically and flush the final byte count even when a percentage cannot be calculated. An unknown total alone does not indicate a stalled download.
+
+Related: [GitHub #145](https://github.com/octasoft-ltd/wsl-ui/issues/145).
+
+## Issue #30: Bare-mounted disks disappear from the application
+
+A bare attachment has no mounted filesystem, so filesystem discovery can legitimately return no paths. The app now retains the disk attachment separately, displays it without an invented mount path, and unmounts it by its original disk path. Successful WSL shutdown clears attachment tracking. If WSL was shut down outside the app, stale tracking can still need reconciliation; an empty filesystem list alone cannot prove a disk was detached.
+
+Partition mounts now preserve their supplied name, filesystem and options. Discovery recognizes device names beyond `/dev/sd*` and filters out unrelated system/container mounts.
+
+For filesystem mounts with no name supplied, the app requests a unique `wsl-ui-...` name under `/mnt/wsl`. This gives discovery and attachment tracking the same exact path, so the disk appears once and its unmount button uses the correct Windows path. Supply a mount name if you need a predictable Linux path. Bare attachments remain unnamed.
+
+Related: [#112](https://github.com/octasoft-ltd/wsl-ui/issues/112), [#130](https://github.com/octasoft-ltd/wsl-ui/issues/130), [#116](https://github.com/octasoft-ltd/wsl-ui/issues/116), [#165](https://github.com/octasoft-ltd/wsl-ui/issues/165).
+
+## Issue #31: Startup sudo actions fail without a usable password prompt
+
+Background startup actions cannot collect a sudo password. The app attempts them with noninteractive sudo, allowing passwordless policies or usable cached credentials. If sudo requires a password, it fails promptly and the notification directs you to **Quick Actions**, where the password prompt is available. Actions configured to run in a terminal now open that terminal on startup. Hidden-output failures and terminal-launch failures produce notifications.
+
+Related: [GitHub #119](https://github.com/octasoft-ltd/wsl-ui/issues/119).
+
+## Issue #32: Long disk operations stop after ten minutes
+
+Older versions applied a hard timeout to conversions, moves, imports and exports, then suggested force-restarting WSL. These disk-writing operations now wait for the command to finish. Install, resize and sparse operations use the same policy. Ordinary status queries retain timeouts. A large operation taking longer than ten minutes is not itself evidence that WSL is hung; avoid force shutdown while it is writing a distribution or archive.
+
+Related: [GitHub #151](https://github.com/octasoft-ltd/wsl-ui/issues/151).
+
+---
+
+## Issue #33: Built-in download fails while resolving or checking its checksum
+
+Built-in downloads now require a SHA-256 entry from the publisher's checksum manifest before importing an image. A checksum fetch, format or mismatch error stops the install. Retry if the publisher is updating a moving release; do not import the failed download. If a built-in URL was customized, supply an explicit SHA-256 checksum for that exact image. Custom catalog entries can still provide their own hash.
+
+Related: [GitHub #110](https://github.com/octasoft-ltd/wsl-ui/issues/110).
+
+---
+
+## Issue #34: Windows ARM64 build cannot find the native C compiler
+
+### Symptoms
+
+A local `cargo build --locked --target aarch64-pc-windows-msvc` fails while compiling `aws-lc-sys`. The observed error was:
+
+```text
+error occurred in cc-rs: failed to find tool "cl.exe": program not found (see https://docs.rs/cc/latest/cc/#compile-time-requirements for help)
+```
+
+### Root Cause
+
+The reqwest 0.13 TLS dependency uses AWS-LC. Its Windows ARM64 build needs the native ARM64 build tools and `clang-cl`, in addition to Rust's ARM64 target. Installing the Rust target alone does not install those Visual Studio components. An x64 build can succeed while the ARM64 toolchain is incomplete.
+
+### Solution
+
+In Visual Studio Installer, modify the C++ build tools installation to include the ARM64 MSVC build tools and Windows SDK. Also enable **C++ Clang Compiler for Windows** and **MSBuild support for LLVM (clang-cl) toolset**, as required by [AWS-LC's Windows build instructions](https://aws.github.io/aws-lc-rs/requirements/windows). Restart the developer shell, add the Rust target with `rustup target add aarch64-pc-windows-msvc`, and retry the command from `src-tauri`.
+
+The `rust-tests` CI job now builds the ARM64 app after the Rust tests on `windows-latest`. This checks compilation without launching or publishing the app; an ARM64 compile check does not exercise the app on an ARM64 device.
+
+### Files Changed
+
+- `.github/workflows/e2e.yml`: install the ARM64 Rust target and compile the app after the existing app and core tests.
+
+---
+
 ## Template for New Issues
 
 ```markdown

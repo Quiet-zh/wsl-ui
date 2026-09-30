@@ -208,6 +208,16 @@ fn escape_for_shell(s: &str) -> String {
     escape(s.into()).to_string()
 }
 
+fn windows_home_in_wsl(userprofile: &str) -> String {
+    let normalized = userprofile.replace('\\', "/");
+    let bytes = normalized.as_bytes();
+    if bytes.len() >= 3 && bytes[0].is_ascii_alphabetic() && &bytes[1..3] == b":/" {
+        format!("/mnt/{}{}", (bytes[0] as char).to_ascii_lowercase(), &normalized[2..])
+    } else {
+        normalized
+    }
+}
+
 /// Substitute variables in command with proper shell escaping
 ///
 /// All variable values are properly escaped to prevent shell injection.
@@ -235,11 +245,7 @@ fn substitute_variables(command: &str, distro: &str, id: Option<&str>) -> String
     if result.contains("${WINDOWS_HOME}") {
         if let Ok(userprofile) = std::env::var("USERPROFILE") {
             // Convert C:\Users\name to /mnt/c/Users/name
-            let wsl_path = userprofile
-                .replace('\\', "/")
-                .replacen("C:", "/mnt/c", 1)
-                .replacen("D:", "/mnt/d", 1)
-                .replacen("E:", "/mnt/e", 1);
+            let wsl_path = windows_home_in_wsl(&userprofile);
             result = result.replace("${WINDOWS_HOME}", &escape_for_shell(&wsl_path));
         }
     }
@@ -310,25 +316,7 @@ pub fn execute_action(action_id: &str, distro: &str, id: Option<&str>, password:
     // Substitute variables
     let command = substitute_variables(&action.command, distro, id);
 
-    // If action requires sudo and password is provided, wrap command with sudo -S
-    let final_command = if action.requires_sudo {
-        match password {
-            Some(pwd) if !pwd.is_empty() => {
-                // Use echo to pipe password to sudo -S
-                // The -S flag makes sudo read password from stdin
-                format!("echo {} | sudo -S bash -c {}", escape_for_shell(pwd), escape_for_shell(&command))
-            }
-            _ => {
-                return Ok(ActionResult {
-                    success: false,
-                    output: String::new(),
-                    error: Some("This action requires sudo. Please provide your password.".to_string()),
-                });
-            }
-        }
-    } else {
-        command.clone()
-    };
+    let final_command = action_command(&command, action.requires_sudo, password);
 
     // Execute in WSL (start in user's home directory) with timeout
     // 120 seconds for sudo commands, 30 for regular
@@ -354,6 +342,25 @@ pub fn execute_action(action_id: &str, distro: &str, id: Option<&str>, password:
             Some(filtered_stderr)
         },
     })
+}
+
+fn action_command(command: &str, requires_sudo: bool, password: Option<&str>) -> String {
+    if requires_sudo {
+        match password {
+            Some(pwd) if !pwd.is_empty() => {
+                // Use echo to pipe password to sudo -S
+                // The -S flag makes sudo read password from stdin
+                format!("echo {} | sudo -S bash -c {}", escape_for_shell(pwd), escape_for_shell(command))
+            }
+            _ => {
+                // Permit NOPASSWD policies and cached credentials, but never wait
+                // for an interactive password prompt during unattended startup.
+                format!("sudo -n bash -c {}", escape_for_shell(command))
+            }
+        }
+    } else {
+        command.to_string()
+    }
 }
 
 /// Run a custom action in the user's terminal
@@ -439,6 +446,45 @@ pub fn get_startup_actions_for_distro(distro_name: &str) -> Vec<CustomAction> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_unattended_sudo_uses_noninteractive_execution() {
+        for password in [None, Some("")] {
+            assert_eq!(action_command("id -u", true, password), "sudo -n bash -c 'id -u'");
+        }
+    }
+
+    #[test]
+    fn test_action_command_keeps_script_quoted_for_sudo() {
+        let command = "printf '%s' \"$HOME\"; echo done";
+        assert_eq!(action_command(command, true, None), format!("sudo -n bash -c {}", escape_for_shell(command)));
+        assert_eq!(action_command(command, false, None), command);
+        assert_eq!(action_command("id -u", true, Some("test password")), "echo 'test password' | sudo -S bash -c 'id -u'");
+    }
+
+    #[test]
+    fn test_windows_home_converts_any_absolute_drive_letter() {
+        for (input, expected) in [
+            (r"C:\Users\name", "/mnt/c/Users/name"),
+            (r"F:\Users\name", "/mnt/f/Users/name"),
+            (r"z:\Users\A B", "/mnt/z/Users/A B"),
+            ("e:/Users/name", "/mnt/e/Users/name"),
+        ] {
+            assert_eq!(windows_home_in_wsl(input), expected);
+        }
+    }
+
+    #[test]
+    fn test_windows_home_only_translates_an_absolute_drive_prefix() {
+        for (input, expected) in [
+            (r"\\server\Users\name", "//server/Users/name"),
+            ("/home/C:/name", "/home/C:/name"),
+            ("C:relative", "C:relative"),
+            ("", ""),
+        ] {
+            assert_eq!(windows_home_in_wsl(input), expected);
+        }
+    }
 
     fn create_test_action(scope: DistroScope) -> CustomAction {
         CustomAction {

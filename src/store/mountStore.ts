@@ -9,14 +9,41 @@ import { logger } from "../utils/logger";
 interface TrackedMount {
   /** Original disk path used in wsl --mount (e.g., D:\data.vhdx or \\.\PHYSICALDRIVE2) */
   diskPath: string;
-  /** Mount point inside WSL (e.g., /mnt/wsl/mydata) */
-  mountPoint: string;
+  /** Mount point explicitly requested from WSL; null for bare attachments. */
+  mountPoint: string | null;
   /** Whether this is a VHD file */
   isVhd: boolean;
   /** Filesystem type if specified */
   filesystem: string | null;
   /** When it was mounted */
   mountedAt: number;
+}
+
+/** Combine filesystem discovery with attachments whose Windows paths we know. */
+export function getDiskMountEntries(mountedDisks: MountedDisk[], trackedMounts: TrackedMount[]) {
+  const matched = new Set<TrackedMount>();
+  const entries = mountedDisks.map((disk) => {
+    // Linux paths are case-sensitive. A filename or basename is not disk
+    // identity, and an ambiguous association must never enable unmounting.
+    const candidates = trackedMounts.filter((mount) => mount.mountPoint === disk.mountPoint);
+    const uniqueDiscovery = mountedDisks.filter((mount) => mount.mountPoint === disk.mountPoint).length === 1;
+    const tracked = candidates.length === 1 && uniqueDiscovery ? candidates[0] : undefined;
+    if (tracked) matched.add(tracked);
+    return { ...disk, diskPath: tracked?.diskPath ?? null };
+  });
+  for (const mount of trackedMounts) {
+    if (!matched.has(mount)) {
+      entries.push({
+        path: mount.diskPath,
+        // Show the known identity when discovery cannot establish the link.
+        mountPoint: mount.diskPath,
+        filesystem: mount.filesystem,
+        isVhd: mount.isVhd,
+        diskPath: mount.diskPath,
+      });
+    }
+  }
+  return entries;
 }
 
 interface MountStore {
@@ -60,12 +87,8 @@ export const useMountStore = create<MountStore>((set, get) => ({
     set({ isLoading: true, error: null });
     try {
       const mountedDisks = await wslService.listMountedDisks();
-      // If no disks mounted (WSL likely shut down), clear tracked mounts too
-      if (mountedDisks.length === 0) {
-        set({ mountedDisks, trackedMounts: [], isLoading: false });
-      } else {
-        set({ mountedDisks, isLoading: false });
-      }
+      // Filesystem discovery cannot confirm whether bare disks are attached.
+      set({ mountedDisks, isLoading: false });
     } catch (error) {
       const errorMsg = typeof error === "string" ? error : (error instanceof Error ? error.message : "Failed to load mounted disks");
       logger.error("Failed to load mounted disks:", "MountStore", error);
@@ -103,19 +126,21 @@ export const useMountStore = create<MountStore>((set, get) => ({
   mountDisk: async (options: MountDiskOptions) => {
     set({ isMounting: true, error: null });
     try {
-      await wslService.mountDisk(options);
+      // Give unnamed filesystem mounts a known, collision-resistant identity.
+      // This avoids guessing WSL's default mountpoint from the disk filename.
+      const requestedOptions = !options.bare && !options.mountName
+        ? { ...options, mountName: `wsl-ui-${crypto.randomUUID()}` }
+        : options;
+      await wslService.mountDisk(requestedOptions);
 
       // Track this mount so we can unmount it later
-      // WSL mounts to /mnt/wsl/<name> - derive mount point from options
-      const diskFileName = options.diskPath.split(/[/\\]/).pop() || options.diskPath;
-      const mountName = options.mountName || diskFileName.replace(/\.[^.]+$/, ""); // Remove extension
-      const mountPoint = `/mnt/wsl/${mountName}`;
+      const mountPoint = options.bare ? null : `/mnt/wsl/${requestedOptions.mountName}`;
 
       const trackedMount: TrackedMount = {
         diskPath: options.diskPath,
         mountPoint,
         isVhd: options.isVhd,
-        filesystem: options.filesystemType || null,
+        filesystem: options.bare ? null : options.filesystemType || null,
         mountedAt: Date.now(),
       };
 
@@ -138,10 +163,16 @@ export const useMountStore = create<MountStore>((set, get) => ({
     set({ isUnmounting: true, error: null });
     try {
       // Look up the original disk path from our tracked mounts
-      const { trackedMounts } = get();
-      const tracked = trackedMounts.find(
-        (m) => m.mountPoint === mountPointOrPath || m.diskPath === mountPointOrPath
-      );
+      const { trackedMounts, mountedDisks } = get();
+      let tracked = trackedMounts.find((mount) => mount.diskPath === mountPointOrPath);
+      if (!tracked && mountPointOrPath.startsWith("/")) {
+        const candidates = trackedMounts.filter((mount) => mount.mountPoint === mountPointOrPath);
+        const discoveries = mountedDisks.filter((mount) => mount.mountPoint === mountPointOrPath);
+        if (candidates.length !== 1 || discoveries.length > 1) {
+          throw new Error("Cannot identify the Windows disk for this mountpoint. Select the attachment by its Windows path.");
+        }
+        tracked = candidates[0];
+      }
 
       // Use the tracked disk path if found, otherwise use what was passed
       const diskPath = tracked?.diskPath || mountPointOrPath;
@@ -151,7 +182,7 @@ export const useMountStore = create<MountStore>((set, get) => ({
       // Remove from tracked mounts if it was tracked
       if (tracked) {
         set((state) => ({
-          trackedMounts: state.trackedMounts.filter((m) => m.mountPoint !== tracked.mountPoint),
+          trackedMounts: state.trackedMounts.filter((m) => m.diskPath !== tracked.diskPath),
         }));
       }
 
